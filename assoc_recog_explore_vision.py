@@ -14,7 +14,6 @@ import PIL.Image
 import cStringIO
 import socket
 import warnings
-import gc
 
 #open cl settings
 if sys.platform == 'darwin':
@@ -606,7 +605,7 @@ def create_model():
         # Familiarity Accumulator
         
         model.familiarity = spa.State(1, feedback=.9, feedback_synapse=0.1) #fb syn influences speed of acc
-        #familiarity_scale = 0.2 #keep stable for negative fam
+        familiarity_scale = 0.2 #keep stable for negative fam
         
         # familiarity accumulator switch
         model.do_fam = spa.AssociativeMemory(vocab_reset, default_output_key='CLEAR', threshold=.2)
@@ -631,153 +630,35 @@ def create_model():
                          function=familiarity_acc_transform)
        
        
-        ##### Recollection & Representation #####
         
-        model.dm_pairs = spa.AssociativeMemory(vocab_learned_pairs,wta_output=True) #input_keys=list_of_pairs
-        nengo.Connection(model.dm_pairs.output,model.dm_pairs.input,transform=.5,synapse=.05)
-
- 		#representation
-        rep_scale = 1.0
-        model.representation = spa.State(D,vocab=vocab_all_words,feedback=1.0)
-        model.rep_filled = spa.State(1,feedback=0,feedback_synapse=.1) #fb syn influences speed of acc
-        #model.do_rep = spa.AssociativeMemory(vocab_reset, default_output_key='CLEAR', threshold=.2)
-        #nengo.Connection(model.do_rep.am.ensembles[-1], model.rep_filled.all_ensembles[0].neurons,
-         #                transform=np.ones((model.rep_filled.all_ensembles[0].n_neurons, 1)) * -10,
-         #                synapse=0.005)
-        
-        nengo.Connection(model.representation.output, model.rep_filled.input, 
-                        transform=rep_scale*np.reshape(sum(vocab_learned_pairs.vectors),((1,D))))
-        
-        
-        ###### Comparison #####
-        
-        model.comparison = spa.Compare(D, vocab=vocab_all_words,neurons_per_multiply=200, input_magnitude=.8)
-        
-        #add clean up memories
-        model.clean_compA = spa.AssociativeMemory(vocab_all_words, wta_output=True, threshold=.3,wta_inhibit_scale=3)
-        model.clean_compB = spa.AssociativeMemory(vocab_all_words, wta_output=True, threshold=.3,wta_inhibit_scale=3)
-        nengo.Connection(model.clean_compA.output,model.comparison.inputA)
-        nengo.Connection(model.clean_compB.output,model.comparison.inputB)
-        
-        #turns out comparison is not an accumulator - we also need one of those.
-        model.comparison_accumulator = spa.State(1, feedback=.9, feedback_synapse=0.1) #fb syn influences speed of acc
-        model.do_compare = spa.AssociativeMemory(vocab_reset, default_output_key='CLEAR', threshold=.3)
-       
- 		#reset
-        nengo.Connection(model.do_compare.am.ensembles[-1], model.comparison_accumulator.all_ensembles[0].neurons,
-                         transform=np.ones((model.comparison_accumulator.all_ensembles[0].n_neurons, 1)) * -10,
-                         synapse=0.005)
-                         
-    	#error because we apply a function to a 'passthrough' node, inbetween ensemble as a solution:
-        model.comparison_result = nengo.Ensemble(n_neurons=100,dimensions=1)
-        nengo.Connection(model.comparison.output, model.comparison_result) 
-        
-        #or better, directly connect to ensembles - but doesn't seem to work.
-		
-        def comparison_acc_transform(comparison):
-    		comparison_scale = .6
-    		comparison_threshold = 0 #actually, kind of bias
-    		comparison_max = .5
-    		return comparison_scale*(2*((comparison - comparison_threshold)/(comparison_max - comparison_threshold)) - 1)
-    	
-    	#nengo.Connection(model.comparison.all_ensembles[0], model.comparison_accumulator.input,
-        #                 function=comparison_acc_transform)
-    	nengo.Connection(model.comparison_result, model.comparison_accumulator.input,
-                         function=comparison_acc_transform)
-		
-		#check input comparison:
-        if False:
-            model.compA = spa.State(D,vocab=vocab_all_words)
-            model.compB = spa.State(D,vocab=vocab_all_words)
-            for ens in model.compA.all_ensembles + model.compB.all_ensembles:
-                ens.neuron_type=nengo.Direct()   # put all these in direct mode so we're not implementing them with neurons
-            nengo.Connection(model.comparison.inputA, model.compA.input)
-            nengo.Connection(model.comparison.inputB, model.compB.input)
-		
-		
-        ##### Motor #####
-        model.motor_net = nengo.Network()
-        with model.motor_net:
-			
-            #input multiplier
-            model.motor_input = spa.State(Dmid,vocab=vocab_motor)
-			
-            #higher motor area (SMA?)
-            model.motor = spa.State(Dmid, vocab=vocab_motor,feedback=.7)
-			
-            #connect input multiplier with higher motor area
-            nengo.Connection(model.motor_input.output,model.motor.input,synapse=.1,transform=1)
-			
-            #finger area
-        
-			#split finger areas in left and right (locations of hemi)
-            model.fingers_left_hemi = spa.AssociativeMemory(vocab_fingers, input_keys=['R1', 'R2'], wta_output=True,threshold=.4)
-            nengo.Connection(model.fingers_left_hemi.output, model.fingers_left_hemi.input, synapse=0.1, transform=0.5) #feedback
-            
-            model.fingers_right_hemi = spa.AssociativeMemory(vocab_fingers, input_keys=['L1', 'L2'], wta_output=True,threshold=.4)
-            nengo.Connection(model.fingers_right_hemi.output, model.fingers_right_hemi.input, synapse=0.1, transform=0.5) #feedback
-
-			#connection between higher order area (hand, finger), to lower area
-            nengo.Connection(model.motor.output, model.fingers_left_hemi.input, transform=.5*motor_mapping) #was .2
-            nengo.Connection(model.motor.output, model.fingers_right_hemi.input, transform=.5*motor_mapping) #was .2
-
-            #finger position (spinal?)
-            model.finger_pos = nengo.networks.EnsembleArray(n_neurons=50, n_ensembles=4) #order: L1, L2, R1, R2
-            nengo.Connection(model.finger_pos.output, model.finger_pos.input, synapse=0.1, transform=0.8) #feedback
-
-			#order: L1, L2, R1, R2
-            nengo.Connection(model.fingers_left_hemi.am.elem_output, model.finger_pos.input[2:4], transform=1.0*np.diag([.56, .55])) #fix these
-            nengo.Connection(model.fingers_right_hemi.am.elem_output, model.finger_pos.input[0:2], transform=1.0*np.diag([0.55, .54])) #fix these
-            
         motor_multiplier = 1.0
         vispair_input = 4
         model.bg = spa.BasalGanglia(
             spa.Actions(
+
                 #wait & start
                 a_aa_wait =            'dot(goal,WAIT) - .9 --> goal=0',
-                #a_attend_item1    =    'dot(goal,DO_TASK) - .0 --> goal=RECOG, attend=ITEM1, do_concepts=GO',
-                a_attend_item1    =     '1.2*dot(goal,DO_TASK) - .0--> goal=RECOG, attend=ITEM1', #do_concepts=GO
 
-                #attend words
-                #b_attending_item1 =    'dot(goal,RECOG) + dot(attend,ITEM1) - concepts_evidence - .3 --> goal=RECOG, attend=ITEM1, do_concepts=GO', # vis_pair=2.5*(ITEM1*concepts)',
-                #c_attend_item2    =    'dot(goal,RECOG) + dot(attend,ITEM1) + concepts_evidence - 1.6 --> goal=RECOG2, attend=ITEM2, vis_pair=3*(ITEM1*concepts)',
+                a_attend_item1    =     '1.1*dot(goal,DO_TASK) - .0--> goal=RECOG, attend=ITEM1', #do_concepts=GO
+                
+                #b_store_item1     =     'dot(goal,RECOG) + dot(attend,ITEM1) - dot(attend,ITEM2) + 1*concepts_evidence - .6 -->              goal=RECOG2-RECOG, attend=ITEM1, vis_pair=%g*(ITEM1*concepts)' % vispair_input,
+                
                 c_attend_item2    =     'dot(goal,RECOG) + dot(attend,ITEM1) - dot(attend,ITEM2) - dot(goal,FAMILIARITY) + concepts_evidence - .1 --> goal=RECOG2-RECOG, attend=ITEM2-ITEM1, vis_pair=%g*(ITEM1*concepts)' % vispair_input,
-
-                #d_attending_item2 =    'dot(goal,RECOG2+RECOG) + dot(attend,ITEM2) - concepts_evidence - .4 --> goal=RECOG2, attend=ITEM2, do_concepts=GO, dm_learned_words=1.0*(~ITEM1*vis_pair)', #vis_pair=1.2*(ITEM2*concepts)
-                #e_start_familiarity =  'dot(goal,RECOG2) + dot(attend,ITEM2) + concepts_evidence - 1.8 --> goal=FAMILIARITY, do_fam=GO, vis_pair=1.9*(ITEM2*concepts), dm_learned_words=2.0*(~ITEM1*vis_pair+~ITEM2*vis_pair)',
+                #d_store_item2     =                     vis_pair=%g*(ITEM1*concepts)' % vispair_input,
+                
                 e_store_item2_start_familiarity =  'dot(goal,RECOG2) + dot(attend,ITEM2) + concepts_evidence - .9 --> goal=FAMILIARITY-RECOG2, attend=ITEM2, vis_pair=%g*(ITEM2*concepts), dm_learned_words=1*(~ITEM1*vis_pair+~ITEM2*vis_pair)' % vispair_input,
-
+                              
                 #judge familiarity
-                #f_accumulate_familiarity =  '1.1*dot(goal,FAMILIARITY) - 0.2 --> goal=FAMILIARITY-RECOG2, do_fam=GO, dm_learned_words=.8*(~ITEM1*vis_pair+~ITEM2*vis_pair)',
                 f_accumulate_familiarity =  '1*dot(goal,FAMILIARITY) - 0.1 --> goal=FAMILIARITY, do_fam=GO, dm_learned_words=1*(~ITEM1*vis_pair+~ITEM2*vis_pair)',
 
-                g_respond_unfamiliar = 'dot(goal,FAMILIARITY) - familiarity - .5*dot(motor,LEFT+RIGHT+INDEX+MIDDLE) - .6 --> goal=RESPOND_MISMATCH-FAMILIARITY, do_fam=GO, motor_input=%g*(target_hand+MIDDLE)' % motor_multiplier,
-                #g2_respond_familiar =   'dot(goal,FAMILIARITY) + familiarity - .5*dot(fingers,L1+L2+R1+R2) - .6 --> goal=RESPOND, do_fam=GO, motor_input=1.6*(target_hand+INDEX)' % motor_multiplier,
+            
 
-                #recollection & representation
-                h_recollection =        'dot(goal,FAMILIARITY) + familiarity - .5*dot(motor,LEFT+RIGHT+INDEX+MIDDLE) - .6 --> goal=RECOLLECTION-FAMILIARITY, dm_pairs = vis_pair',
-                i_representation =      'dot(goal,RECOLLECTION) - rep_filled - .1 --> goal=RECOLLECTION, dm_pairs = vis_pair, representation=3*dm_pairs, clean_compA = 2*(~ITEM1*vis_pair), clean_compB = 2*(~ITEM1*representation)',
-
-                #comparison & respond
-                j_10_compare_word1 =    'dot(goal,RECOLLECTION+COMPARE_ITEM1) - dot(goal,COMPARE_ITEM2) + rep_filled - 1.2 --> goal=COMPARE_ITEM1, do_compare=GO, clean_compA = 2*(~ITEM1*vis_pair), clean_compB = 2*(~ITEM1*representation)',
-                k_11_match_word1 =      'dot(goal,COMPARE_ITEM1) + comparison_accumulator - .7 --> goal=COMPARE_ITEM2, clean_compA = 2*(~ITEM1*vis_pair), clean_compB = 2*(~ITEM1*representation)',
-                l_12_mismatch_word1 =   'dot(goal,COMPARE_ITEM1) - comparison_accumulator - .6 --> goal=RESPOND_MISMATCH-COMPARE_ITEM1, motor_input=%g*(target_hand+MIDDLE), do_compare=GO, clean_compA = 1*(~ITEM1*vis_pair), clean_compB = 1*(~ITEM1*representation)' % motor_multiplier,
-                
-                compare_word2 =         'dot(goal,COMPARE_ITEM2) - .1 --> goal=COMPARE_ITEM2, do_compare=GO, clean_compA = 2*(~ITEM2*vis_pair), clean_compB = 2*(~ITEM2*representation)',
-                m_match_word2 =         'dot(goal,COMPARE_ITEM2) + comparison_accumulator - .8 --> goal=RESPOND_MATCH-COMPARE_ITEM2, motor_input=%g*(target_hand+INDEX), do_compare=GO, clean_compA = 2*(~ITEM2*vis_pair), clean_compB = 2*(~ITEM2*representation)' % motor_multiplier,
-                n_mismatch_word2 =      'dot(goal,COMPARE_ITEM2) - comparison_accumulator - dot(motor,LEFT+RIGHT+INDEX+MIDDLE) - .8 --> goal=RESPOND_MISMATCH-COMPARE_ITEM2, motor_input=%g*(target_hand+MIDDLE),do_compare=GO, clean_compA = 2*(~ITEM2*vis_pair), clean_compB = 2*(~ITEM2*representation)' % motor_multiplier,
-                
-                #respond
-                o_respond_match =       'dot(goal,RESPOND_MATCH) - .1 --> goal=RESPOND_MATCH, motor_input=%g*(target_hand+INDEX)' % motor_multiplier,
-                p_respond_mismatch =    'dot(goal,RESPOND_MISMATCH) - .1 --> goal=RESPOND_MISMATCH, motor_input=%g*(target_hand+MIDDLE)' % motor_multiplier,
-                
-                #finish
-                x_response_done =       'dot(goal,RESPOND_MATCH) + dot(goal,RESPOND_MISMATCH) + 1*dot(motor,LEFT+RIGHT+INDEX+MIDDLE) - .7 --> goal=2*END',
-                y_end =                 'dot(goal,END)-.1 --> goal=END-RESPOND_MATCH-RESPOND_MISMATCH',
+                #y_end =                 'dot(goal,END)-.1 --> goal=END-RESPOND_MATCH-RESPOND_MISMATCH',
                 z_threshold =           '.05 --> goal=0'
 
             ))
 
+            
         
         print(model.bg.actions.count)
         #print(model.bg.dimensions)
@@ -797,31 +678,7 @@ def create_model():
             ))
 
 
-        #probes
-        model.pr_motor_pos = nengo.Probe(model.finger_pos.output,synapse=.01) #raw vector (dimensions x time)
        
-        #model.pr_motorSMA = nengo.Probe(model.motor.output, synapse=.01)
-
-        if not nengo_gui_on:
-            #vision
-            model.pr_vision_gabor = nengo.Probe(model.vision_gabor.neurons,synapse=.005) #do we need synapse, or should we do something with the spikes
-            
-            #familiarity
-            model.pr_familiarity = nengo.Probe(model.dm_learned_words.am.elem_output,synapse=.01) #element output, don't include default
-            
-            #model.pr_concepts = nengo.Probe(model.concepts.am.elem_output, synapse=.01)  # element output, don't include default
-            
-            #retrieval
-            model.pr_retrieval = nengo.Probe(model.dm_pairs.am.elem_output,synapse=.01) #do we need synapse, or should we do something with the spikes
-            
-            #representation
-            model.pr_representation= nengo.Probe(model.representation.output,synapse=.01) #do we need synapse, or should we do something with the spikes
-          
-            #motor            
-            model.pr_motor_left = nengo.Probe(model.fingers_left_hemi.am.elem_output, synapse=.01)
-            model.pr_motor_right = nengo.Probe(model.fingers_right_hemi.am.elem_output,synapse=.01)
-
-
         #input
         model.input = spa.Input(goal=goal_func)
 
@@ -935,28 +792,45 @@ def do_trial(trial_info, hand):
         print('\n\n---- Trial: ' + trial_info[0] + ', Fan ' + str(trial_info[1])
           + ', ' + trial_info[2] + ' - ' + ' '.join(trial_info[3:]) + ' - ' + hand + ' ----\n')
 
-    #run sim 2200 ms, should be enough for responses (incl fixation)
-    sim.run(2.201,progress_bar=verbose) #make this shorter than fastest RT
+    #run sim at least 100 ms
+    sim.run(.701,progress_bar=verbose) #make this shorter than fastest RT
 
+    if verbose:
+        print('Stepped sim started...')
 
-    #get RT and finger
+    stepsize = 5 #ms
     resp = -1
     resp_step = -1
-    motor_data = sim.data[model.pr_motor_pos]
 
-    for i in range(sim.n_steps): #range gives 0 to end-1
+    while sim.time < 2: #2 seconds should be enough for correct responses
+
+        # run stepsize ms, update time
+        sim.run_steps(stepsize, progress_bar=False)
 
         #calc finger position pr_motor_pos
-        motor_pos = motor_data[i]
-        position_finger = np.max(motor_pos)
+        last_motor_pos = sim.data[model.pr_motor_pos][int(sim.n_steps)-1 ]
+        position_finger = np.max(last_motor_pos)
 
         if resp_step == -1 and position_finger > .8: #.8 represents key press
-            resp_step = i
-            # order: L1, L2, R1, R2
-            resp = np.argmax(motor_pos)
+            resp_step = int(sim.n_steps)
+
+
+
+    if resp_step == -1:
+        resp_step = int(sim.n_steps)
+    else:
+	    # determine response
+	    #similarities = [np.dot(sim.data[model.pr_motor][resp_step - 1], vocab_fingers['L1'].v),
+        #                np.dot(sim.data[model.pr_motor][resp_step - 1], vocab_fingers['L2'].v),
+        #                np.dot(sim.data[model.pr_motor][resp_step - 1], vocab_fingers['R1'].v),
+        #                np.dot(sim.data[model.pr_motor][resp_step - 1], vocab_fingers['R2'].v)]
+        #resp = np.argmax(similarities)
+
+		#order: L1, L2, R1, R2
+        resp_motor_pos = sim.data[model.pr_motor_pos][resp_step-1]
 
         
-    #order: L1, L2, R1, R2
+
     if verbose:
         if resp == 0:
             print 'Left Index'
@@ -1138,7 +1012,7 @@ def do_1_block(block_hand='RIGHT', subj=0):
     #shuffle
     random.shuffle(stims_in)
 
-    for i in stims_in[0:1]:
+    for i in stims_in:
         sim.reset()
         do_trial(i, block_hand)
 
@@ -1151,7 +1025,7 @@ def do_1_block(block_hand='RIGHT', subj=0):
     # save behavioral data
     save_results('output' + '_' + cur_hand)
     save_probe(vision_probe,'output_vision' + '_' + cur_hand)
-    save_probe(familiarity_probe, 'output_familiarity' + '_' + cur_hand)
+    save_probe(familiarity, 'output_familiarity' + '_' + cur_hand)
     save_probe(retrieval_probe,'output_retrieval' + '_' + cur_hand)
     save_probe(representation_probe,'output_representation' + '_' + cur_hand)
     save_probe(motor_left_probe,'output_left_motor' + '_' + cur_hand)
@@ -1231,20 +1105,7 @@ def do_experiment(subj=1,short=True):
     #for each block
     trial = 0
     for bl in range(14):
-		
-        print('Block ' + str(bl+1) + '/14')
-		
-        #clear probes
-        del vision_probe[:]
-        del familiarity_probe[:]
-        del concepts_probe[:]
-        del retrieval_probe[:]
-        del representation_probe[:]
-        del motor_left_probe[:]
-        del motor_right_probe[:]
-        
-        gc.collect()
-    
+
         # get all targets/rpfoils for each block
         stims_in = stims_target_rpfoils
 
@@ -1265,22 +1126,11 @@ def do_experiment(subj=1,short=True):
         else:
             block_hand = 'LEFT'
 
-        for i in stims_in[0:20]: #stims_in:
+        for i in stims_in:
             trial += 1
             print('Trial ' + str(trial) + '/' + str(len(stims_in)*14))
             sim.reset()
             do_trial(i, block_hand)
-        
-        #save probes/block
-        save_probe(vision_probe,'output_visual_model_subj' + str(subj) + '_block' + str(bl+1))
-        save_probe(familiarity_probe, 'output_familiarity_model_subj' + str(subj) + '_block' + str(bl+1))
-        save_probe(retrieval_probe,'output_retrieval_model_subj' + str(subj) + '_block' + str(bl+1))
-        save_probe(representation_probe,'output_representation_model_subj' + str(subj) + '_block' + str(bl+1))
-        save_probe(motor_left_probe,'output_left_motor_model_subj' + str(subj) + '_block' + str(bl+1))
-        save_probe(motor_right_probe,'output_right_motor_model_subj' + str(subj) + '_block' + str(bl+1))
-        
-        
-        
 
     print(
     '\nTotal time: ' + str(round(time.time() - start, 2)) + ' seconds for ' + str(round(total_sim_time,2)) + ' seconds simulation.\n')
@@ -1289,11 +1139,16 @@ def do_experiment(subj=1,short=True):
 
     # save behavioral data
     save_results('output_model_subj_' + str(subj))
-    #save_vision('output_visual_model_subj' + str(subj))
-    #save_familiarity('output_familiarity_model_subj' + str(subj))
-    #save_concepts('output_concepts_model_subj' + str(subj))
+    save_vision('output_visual_model_subj' + str(subj))
+    save_familiarity('output_familiarity_model_subj' + str(subj))
+    save_concepts('output_concepts_model_subj' + str(subj))
     
-
+    save_probe(vision_probe,'output_visual_model_subj' + str(subj))
+    save_probe(familiarity, 'output_familiarity_model_subj' + str(subj))
+    save_probe(retrieval_probe,'output_retrieval_model_subj' + str(subj))
+    save_probe(representation_probe,'output_representation_model_subj' + str(subj))
+    save_probe(motor_left_probe,'output_left_motor_model_subj' + str(subj))
+    save_probe(motor_right_probe,'output_right_motor_model_subj' + str(subj))
 
 
 #choice of trial, etc
@@ -1319,34 +1174,30 @@ else:
     cur_item2 = 'HOOD'
 
     #New Foils2
-    cur_item1 = 'EXIT'
-    cur_item2 = 'BARN'
+    #cur_item1 = 'EXIT'
+    #cur_item2 = 'BARN'
 
-    #Targets Fan 1 
+    #Targets
     cur_item1 = 'METAL'
     cur_item2 = 'SPARK'
-	
-	#Targets Fan 2
-    cur_item1 = 'FLAME'
-    cur_item2 = 'CAPE'
-	
-    #Re-paired foils 1 - Fan 1
-    #cur_item1 = 'SODA' 
-    #cur_item2 = 'BRAIN'
 
-    #Re-paired foils 2 - Fan 1 
+    #Re-paired foils 1
+    cur_item1 = 'SODA' 
+    cur_item2 = 'BRAIN'
+
+    #Re-paired foils 2
     #cur_item1 = 'METAL' 
     #cur_item2 = 'MOTOR'
 
-    #Re-paired foils 3 - Fan 2
-    #cur_item1 = 'FLAME'
-    #cur_item2 = 'RACK'
+    #Re-paired foils 3
+    #cur_item1 = 'JELLY'
+    #cur_item2 = 'SPARK'
 
-    #Re-paired foils 4 - Fan 2
-    #cur_item1 = 'FLAME' 
-    #cur_item2 = 'FILE'
+    #Re-paired foils 4
+    #cur_item1 = 'DEBT' 
+    #cur_item2 = 'SPEAR'
 
-    cur_hand = 'LEFT'
+    cur_hand = 'RIGHT'
 
     initialize_model(subj=0)
 
