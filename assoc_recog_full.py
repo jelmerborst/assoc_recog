@@ -365,6 +365,7 @@ def initialize_vocabs():
             '%s*ITEM1 + %s*ITEM2' % (item1, item2)))  # add pairs to concepts to use same vectors
         list_of_pairs.append('%s_%s' % (item1, item2))  # keep list of pairs notation
 
+
     # add all presented pairs to concepts for display
     for item1, item2 in newfoil_pairs:
         vocab_concepts.add('%s_%s' % (item1, item2), vocab_concepts.parse(
@@ -891,6 +892,7 @@ def prepare_sim(seed=None):
     print '---- BUILDING SIMULATOR ----'
 
     global sim
+    global ctx
 
     print('\t' + str(sum(ens.n_neurons for ens in model.all_ensembles)) + ' neurons')
     print('\t' + str(len(vocab_concepts.keys)) + ' concepts')
@@ -898,7 +900,11 @@ def prepare_sim(seed=None):
     start = time.time()
 
     if ocl:
-        sim = nengo_ocl.Simulator(model,context=ctx)
+    
+    	#   n_prealloc_probes : int (optional)
+        #Number of timesteps to buffer when probing. Larger numbers mean less
+        #data transfer with the device (faster), but use more device memory. 32 = default
+        sim = nengo_ocl.Simulator(model,context=ctx,n_prealloc_probes=32)
     else:
         sim = nengo.Simulator(model)
     print('\n ---- DONE in ' + str(round(time.time() - start,2)) + ' seconds ----\n')
@@ -1170,6 +1176,7 @@ def do_experiment(subj=1,short=True):
     #for full exp total number new foils = 14*16=224. We only have 208, but we can repeat some.
     #for short exp we repeat a set of 8 foils each block (model is reset anyway)
     global verbose
+    global sim
     verbose = False
     global total_sim_time
     global results
@@ -1188,7 +1195,7 @@ def do_experiment(subj=1,short=True):
     #    subj = 1
         short = True
 
-
+	
     subj_gl = subj
     trial_nr = 0
     total_sim_time = 0
@@ -1203,7 +1210,9 @@ def do_experiment(subj=1,short=True):
 
 
     start = time.time()
-
+	
+    sim = []
+	
     initialize_model(subj=subj,short=short)
     create_model()
     prepare_sim()
@@ -1243,8 +1252,15 @@ def do_experiment(subj=1,short=True):
         del motor_left_probe[:]
         del motor_right_probe[:]
         
+        #close and start sim
+        sim.close()
+        del sim
+        
         gc.collect()
-    
+    	
+    	prepare_sim()
+
+    	
         # get all targets/rpfoils for each block
         stims_in = stims_target_rpfoils
 
@@ -1265,12 +1281,20 @@ def do_experiment(subj=1,short=True):
         else:
             block_hand = 'LEFT'
 
-        for i in stims_in[0:20]: #stims_in:
+        for i in stims_in: #stims_in:
+            #print('\n\nSize ctx = ' + str(sys.getsizeof(ctx)))
+        	
             trial += 1
             print('Trial ' + str(trial) + '/' + str(len(stims_in)*14))
+            
             sim.reset()
+            
+			# clear out probes
+            for probe in sim.model.probes:
+                del sim._probe_outputs[probe][:]
+    			
             do_trial(i, block_hand)
-        
+    
         #save probes/block
         save_probe(vision_probe,'output_visual_model_subj' + str(subj) + '_block' + str(bl+1))
         save_probe(familiarity_probe, 'output_familiarity_model_subj' + str(subj) + '_block' + str(bl+1))
@@ -1289,9 +1313,7 @@ def do_experiment(subj=1,short=True):
 
     # save behavioral data
     save_results('output_model_subj_' + str(subj))
-    #save_vision('output_visual_model_subj' + str(subj))
-    #save_familiarity('output_familiarity_model_subj' + str(subj))
-    #save_concepts('output_concepts_model_subj' + str(subj))
+
     
 
 
